@@ -52,14 +52,13 @@ class ViTPatchEmbeddings(nn.Module):
         self.patch_size = cfg.patch_size  # 16
         self.hidden_dim = cfg.hidden_dim  # 768
 
-        # self.num_patches = ...          # total patches = (img_size // patch_size)²
-        # self.conv = ...                 # Conv2d patch extractor: kernel_size and stride
+        self.num_patches =  (self.img_size//self.patch_size)**2         # total patches = (img_size // patch_size)²
+        self.conv = nn.Conv2d(in_channels=3,out_channels=self.hidden_dim,kernel_size=self.patch_size,stride = self.patch_size,padding="valid")            # Conv2d patch extractor: kernel_size and stride
         #                                 # both equal to patch_size, in_channels=3,
         #                                 # out_channels=hidden_dim, padding="valid"
-        # self.position_embedding = ...   # learnable nn.Parameter of shape
+        self.position_embedding = nn.Parameter(torch.zeros(1,self.num_patches,self.hidden_dim))   # learnable nn.Parameter of shape
         #                                 # [1, num_patches, hidden_dim]
-
-        raise NotImplementedError
+        self.flatten = nn.Flatten(start_dim=-2)
 
     def forward(self, x):
         """
@@ -70,18 +69,22 @@ class ViTPatchEmbeddings(nn.Module):
         """
         # TODO 1: Apply the convolutional patch extractor.
         #         Output: [B, hidden_dim, 32, 32]
+        x = self.conv(x)
 
         # TODO 2: Flatten the two spatial dimensions into one.
         #         Output: [B, hidden_dim, 1024]
-
+        x = self.flatten(x)
+        
         # TODO 3: Swap the patch and channel dimensions.
         #         Output: [B, 1024, hidden_dim]
+        x = x.permute(0, 2, 1)
 
         # TODO 4: Add the learned position embeddings to each patch token.
         #         Output: [B, 1024, hidden_dim]
 
-        raise NotImplementedError
+        x = x + self.position_embedding
 
+        return x
 
 # ─────────────────────────────────────────────────────────────────────────────
 class ViTAttention(nn.Module):
@@ -101,15 +104,16 @@ class ViTAttention(nn.Module):
         assert self.hidden_dim % self.n_heads == 0
         self.dropout = cfg.dropout
 
-        # self.head_dim = ...          # embedding dimension per attention head
-        # self.qkv_proj = ...          # single Linear: hidden_dim → 3 × hidden_dim
+        self.head_dim = self.hidden_dim // self.n_heads          # embedding dimension per attention head
+        self.qkv_proj = nn.Linear(self.hidden_dim, self.hidden_dim*3)          # single Linear: hidden_dim → 3 × hidden_dim
         #                              # (Q, K, V packed together; bias=True)
-        # self.out_proj = ...          # Linear: hidden_dim → hidden_dim (bias=True)
-        # self.attn_dropout = ...      # Dropout on attention weights
-        # self.resid_dropout = ...     # Dropout on the output projection
-        # self.sdpa = ...              # True if F.scaled_dot_product_attention is available
+        self.out_proj = nn.Linear(self.hidden_dim,self.hidden_dim) # Linear: hidden_dim → hidden_dim (bias=True)
+        self.attn_dropout = nn.Dropout(p=self.dropout)      # Dropout on attention weights
+        self.resid_dropout = nn.Dropout(p=self.dropout)    # Dropout on the output projection
+        import torch.nn.functional as F
 
-        raise NotImplementedError
+        self.sdpa = hasattr(nn.functional, "scaled_dot_product_attention") # True if F.scaled_dot_product_attention is available
+
 
     def forward(self, x):
         """
@@ -124,6 +128,8 @@ class ViTAttention(nn.Module):
         #         qkv_proj, then split into three equal chunks along the
         #         last dimension.
         #         q, k, v each → [B, T, C]
+        x = self.qkv_proj(x)
+        q,k,v = x.chunk(3, dim=-1)
 
         # TODO 2: Use view to introduce the head dimension, then transpose
         #         so heads come before the sequence.
