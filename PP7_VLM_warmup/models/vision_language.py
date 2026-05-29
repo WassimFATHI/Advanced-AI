@@ -36,7 +36,7 @@ class VisionLanguageModel(nn.Module):
 
         vision_hidden_dim = self.vision_backbone.config.hidden_size
         language_hidden_dim = self.language_model.config.hidden_size
-        self.modality_projector # TODO
+        self.modality_projector = ModalityProjector(vision_hidden_dim,language_hidden_dim)
 
         image_size = self.vision_backbone.config.image_size
         patch_size = self.vision_backbone.config.patch_size
@@ -79,10 +79,10 @@ class VisionLanguageModel(nn.Module):
         """
         token_embd = self.language_model.get_input_embeddings()(input_ids)
 
-        vision_outputs = #TODO call the vision backbone with return_dict=True
+        vision_outputs = self.vision_backbone(pixel_values,return_dict=True)#TODO call the vision backbone with return_dict=True
 
         vision_outputs = vision_outputs.last_hidden_state
-        image_embd = #TODO call the modality projector
+        image_embd = self.modality_projector(vision_outputs)
         token_embd = self._replace_img_tokens_with_embd(input_ids, token_embd, image_embd)
 
         outputs = self.language_model(
@@ -122,7 +122,22 @@ class VisionLanguageModel(nn.Module):
             Generated token ids of shape `[batch, generated_length]`.
         """
         # TODO How to get the logits from inputs_ids and pixel_values ?
-        
+        token_embd = self.language_model.get_input_embeddings()(input_ids)
+
+        vision_outputs = self.vision_backbone(pixel_values,return_dict=True)#TODO call the vision backbone with return_dict=True
+
+        vision_outputs = vision_outputs.last_hidden_state
+        image_embd = self.modality_projector(vision_outputs)
+        token_embd = self._replace_img_tokens_with_embd(input_ids, token_embd, image_embd)
+
+        outputs = self.language_model(
+            inputs_embeds=token_embd,
+            attention_mask=attention_mask,
+            use_cache=True,
+            return_dict=True,
+        )
+
+
         logits = outputs.logits[:, -1, :]
         past_key_values = outputs.past_key_values
 

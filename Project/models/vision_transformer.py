@@ -52,14 +52,13 @@ class ViTPatchEmbeddings(nn.Module):
         self.patch_size = cfg.patch_size  # 16
         self.hidden_dim = cfg.hidden_dim  # 768
 
-        # self.num_patches = ...          # total patches = (img_size // patch_size)²
-        # self.conv = ...                 # Conv2d patch extractor: kernel_size and stride
+        self.num_patches =  (self.img_size//self.patch_size)**2         # total patches = (img_size // patch_size)²
+        self.conv = nn.Conv2d(in_channels=3,out_channels=self.hidden_dim,kernel_size=self.patch_size,stride = self.patch_size,padding="valid")            # Conv2d patch extractor: kernel_size and stride
         #                                 # both equal to patch_size, in_channels=3,
         #                                 # out_channels=hidden_dim, padding="valid"
-        # self.position_embedding = ...   # learnable nn.Parameter of shape
+        self.position_embedding = nn.Parameter(torch.zeros(1,self.num_patches,self.hidden_dim))   # learnable nn.Parameter of shape
         #                                 # [1, num_patches, hidden_dim]
-
-        raise NotImplementedError
+        self.flatten = nn.Flatten(start_dim=-2)
 
     def forward(self, x):
         """
@@ -70,18 +69,22 @@ class ViTPatchEmbeddings(nn.Module):
         """
         # TODO 1: Apply the convolutional patch extractor.
         #         Output: [B, hidden_dim, 32, 32]
+        x = self.conv(x)
 
         # TODO 2: Flatten the two spatial dimensions into one.
         #         Output: [B, hidden_dim, 1024]
-
+        x = self.flatten(x)
+        
         # TODO 3: Swap the patch and channel dimensions.
         #         Output: [B, 1024, hidden_dim]
+        x = x.permute(0, 2, 1)
 
         # TODO 4: Add the learned position embeddings to each patch token.
         #         Output: [B, 1024, hidden_dim]
 
-        raise NotImplementedError
+        x = x + self.position_embedding
 
+        return x
 
 # ─────────────────────────────────────────────────────────────────────────────
 class ViTAttention(nn.Module):
