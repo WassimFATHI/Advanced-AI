@@ -104,15 +104,16 @@ class ViTAttention(nn.Module):
         assert self.hidden_dim % self.n_heads == 0
         self.dropout = cfg.dropout
 
-        # self.head_dim = ...          # embedding dimension per attention head
-        # self.qkv_proj = ...          # single Linear: hidden_dim → 3 × hidden_dim
+        self.head_dim = self.hidden_dim // self.n_heads          # embedding dimension per attention head
+        self.qkv_proj = nn.Linear(self.hidden_dim, self.hidden_dim*3)          # single Linear: hidden_dim → 3 × hidden_dim
         #                              # (Q, K, V packed together; bias=True)
-        # self.out_proj = ...          # Linear: hidden_dim → hidden_dim (bias=True)
-        # self.attn_dropout = ...      # Dropout on attention weights
-        # self.resid_dropout = ...     # Dropout on the output projection
-        # self.sdpa = ...              # True if F.scaled_dot_product_attention is available
+        self.out_proj = nn.Linear(self.hidden_dim,self.hidden_dim) # Linear: hidden_dim → hidden_dim (bias=True)
+        self.attn_dropout = nn.Dropout(p=self.dropout)      # Dropout on attention weights
+        self.resid_dropout = nn.Dropout(p=self.dropout)    # Dropout on the output projection
+        import torch.nn.functional as F
 
-        raise NotImplementedError
+        self.sdpa = hasattr(nn.functional, "scaled_dot_product_attention") # True if F.scaled_dot_product_attention is available
+
 
     def forward(self, x):
         """
@@ -127,10 +128,16 @@ class ViTAttention(nn.Module):
         #         qkv_proj, then split into three equal chunks along the
         #         last dimension.
         #         q, k, v each → [B, T, C]
+        x = self.qkv_proj(x)
+        q,k,v = x.chunk(3, dim=-1)
 
         # TODO 2: Use view to introduce the head dimension, then transpose
         #         so heads come before the sequence.
         #         Each of q, k, v → [B, n_heads, T, head_dim]
+        q = q.view(B, T, self.n_heads, self.head_dim).permute(0,2,1,3)
+        k = k.view(B, T, self.n_heads, self.head_dim).permute(0,2,1,3)
+        v = v.view(B, T, self.n_heads, self.head_dim).permute(0,2,1,3)
+
 
         # TODO 3: Attend.
         #   If self.sdpa:
@@ -139,12 +146,17 @@ class ViTAttention(nn.Module):
         #       both directions.
         #   Else (fallback):
         #       scores = q @ k.T / sqrt(head_dim), softmax, dropout, @ v
-
+        if self.sdpa:
+            scores = nn.functional.scaled_dot_product_attention(q,k,v,dropout_p=self.dropout,is_causal=False)
+        else:
+            scores = attn_dropout(torch.softmax((q@k.T)/sqrt(self.head_dim)))@V
+        
         # TODO 4: Transpose the head and sequence dimensions back, call
         #         contiguous, then collapse the head dimension into the
         #         channel dimension with view.
         #         Apply out_proj then resid_dropout.
         #         Output: [B, T, C]
+        scores.permute(0,2,1,3)
 
         raise NotImplementedError
 
