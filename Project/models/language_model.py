@@ -37,7 +37,7 @@ class RMSNorm(nn.Module):
     def __init__(self, cfg):
         super().__init__()
 
-        self.weight = nn.Parameter(torch.ones(cfg.hidden_dim))
+        self.weight = nn.Parameter(torch.ones(cfg.hidden_dim)) # learnable scale of shape [hidden_dim], initialized to all ones (use nn.Parameter)
         self.rms_eps = cfg.rms_eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -184,21 +184,15 @@ class LMAttention(nn.Module):
 
         assert self.n_heads % self.n_kv_heads == 0
 
-        self.n_kv_groups = self.n_heads // self.n_kv_heads
-        self.head_dim = self.hidden_dim // self.n_heads
-        self.q_proj = nn.Linear(
-            self.hidden_dim, self.n_heads * self.head_dim, bias=False
-        )
-        self.k_proj = nn.Linear(
-            self.hidden_dim, self.n_kv_heads * self.head_dim, bias=False
-        )
-        self.v_proj = nn.Linear(
-            self.hidden_dim, self.n_kv_heads * self.head_dim, bias=False
-        )
-        self.out_proj = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
-        self.attn_dropout = nn.Dropout(self.dropout)
-        self.resid_dropout = nn.Dropout(self.dropout)
-        self.sdpa = hasattr(F, "scaled_dot_product_attention")
+        self.n_kv_groups = self.n_heads // self.n_kv_heads # query heads per KV head (n_heads // n_kv_heads)
+        self.head_dim = self.hidden_dim // self.n_heads # embedding dimension per attention head
+        self.q_proj = nn.Linear(self.hidden_dim, self.n_heads * self.head_dim, bias=False) # Linear: hidden_dim → n_heads × head_dim (no bias)
+        self.k_proj = nn.Linear(self.hidden_dim, self.n_kv_heads * self.head_dim, bias=False) # Linear: hidden_dim → n_kv_heads × head_dim (no bias)
+        self.v_proj = nn.Linear(self.hidden_dim, self.n_kv_heads * self.head_dim, bias=False) # Linear: same output shape as k_proj (no bias)
+        self.out_proj = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False) # Linear: hidden_dim → hidden_dim (no bias)
+        self.attn_dropout = nn.Dropout(self.dropout) # Dropout on attention weights
+        self.resid_dropout = nn.Dropout(self.dropout) # Dropout on the output
+        self.sdpa = hasattr(F, "scaled_dot_product_attention") # True if F.scaled_dot_product_attention is available
 
     def forward(self, x, cos, sin, attention_mask=None, block_kv_cache=None):
         """
@@ -269,25 +263,19 @@ class LMAttention(nn.Module):
         attn_mask = None
         if attention_mask is not None:
             mask = attention_mask[:, :T_kv].to(device=q.device)
-            attn_mask = torch.zeros(
-                mask.shape, dtype=q.dtype, device=q.device
-            )
-            attn_mask = attn_mask.masked_fill(
-                mask == 0, torch.finfo(q.dtype).min
-            )
+            attn_mask = torch.zeros(mask.shape, dtype=q.dtype, device=q.device)
+            attn_mask = attn_mask.masked_fill(mask == 0, torch.finfo(q.dtype).min)
             attn_mask = attn_mask.unsqueeze(1).unsqueeze(1)
 
         is_causal = T_curr == T_kv and T_curr > 1
 
         if self.sdpa:
-            attn = F.scaled_dot_product_attention(
-                q,
-                k_exp,
-                v_exp,
-                attn_mask=attn_mask,
-                dropout_p=self.dropout if self.training else 0.0,
-                is_causal=is_causal,
-            )
+            attn = F.scaled_dot_product_attention(q,
+                                                  k_exp,
+                                                  v_exp,
+                                                  attn_mask=attn_mask,
+                                                  dropout_p=self.dropout if self.training else 0.0,
+                                                  is_causal=is_causal)
         else:
             scores = q @ k_exp.transpose(-2, -1)
             scores = scores / (self.head_dim ** 0.5)
@@ -295,21 +283,13 @@ class LMAttention(nn.Module):
                 scores = scores + attn_mask
             if is_causal:
                 causal_mask = torch.triu(
-                    torch.ones(
-                        T_curr, T_kv, dtype=torch.bool, device=q.device
-                    ),
-                    diagonal=1,
-                )
-                scores = scores.masked_fill(
-                    causal_mask, torch.finfo(q.dtype).min
-                )
+                    torch.ones(T_curr, T_kv, dtype=torch.bool, device=q.device),diagonal=1)
+                scores = scores.masked_fill(causal_mask, torch.finfo(q.dtype).min)
             attn_weights = F.softmax(scores, dim=-1)
             attn_weights = self.attn_dropout(attn_weights)
             attn = attn_weights @ v_exp
 
-        out = attn.transpose(1, 2).contiguous().view(
-            B, T_curr, self.hidden_dim
-        )
+        out = attn.transpose(1, 2).contiguous().view(B, T_curr, self.hidden_dim)
         out = self.out_proj(out)
         out = self.resid_dropout(out)
         return out, block_kv_cache
@@ -328,9 +308,9 @@ class LMMLP(nn.Module):
     def __init__(self, cfg):
         super().__init__()
 
-        self.gate_proj = nn.Linear(cfg.hidden_dim, cfg.inter_dim, bias=False)
-        self.up_proj = nn.Linear(cfg.hidden_dim, cfg.inter_dim, bias=False)
-        self.down_proj = nn.Linear(cfg.inter_dim, cfg.hidden_dim, bias=False)
+        self.gate_proj = nn.Linear(cfg.hidden_dim, cfg.inter_dim, bias=False) # Linear: hidden_dim → inter_dim, no bias (gate branch)
+        self.up_proj = nn.Linear(cfg.hidden_dim, cfg.inter_dim, bias=False) # Linear: hidden_dim → inter_dim, no bias (value branch)
+        self.down_proj = nn.Linear(cfg.inter_dim, cfg.hidden_dim, bias=False) # Linear: inter_dim → hidden_dim, no bias
 
     def forward(self, x):
         """
@@ -348,10 +328,10 @@ class LMBlock(nn.Module):
     def __init__(self, cfg):
         super().__init__()
 
-        self.norm1 = RMSNorm(cfg)
-        self.attn = LMAttention(cfg)
-        self.norm2 = RMSNorm(cfg)
-        self.mlp = LMMLP(cfg)
+        self.norm1 = RMSNorm(cfg) # RMSNorm applied before attention
+        self.attn = LMAttention(cfg) # the LMAttention sub-layer
+        self.norm2 = RMSNorm(cfg) # RMSNorm applied before the MLP
+        self.mlp = LMMLP(cfg) # the LMMLP sub-layer
 
     def forward(self, x, cos, sin, attention_mask=None, block_kv_cache=None):
         """
@@ -368,13 +348,11 @@ class LMBlock(nn.Module):
         attention returns a (output, cache) tuple — unpack it.
         """
         # TODO: Two pre-norm residual sub-layers (attention, then MLP).
-        attn_out, block_kv_cache = self.attn(
-            self.norm1(x),
-            cos,
-            sin,
-            attention_mask=attention_mask,
-            block_kv_cache=block_kv_cache,
-        )
+        attn_out, block_kv_cache = self.attn(self.norm1(x),
+                                             cos,
+                                             sin,
+                                             attention_mask=attention_mask,
+                                             block_kv_cache=block_kv_cache)
         x = x + attn_out
         x = x + self.mlp(self.norm2(x))
         return x, block_kv_cache
@@ -395,16 +373,17 @@ class LanguageModel(nn.Module):
         self.cfg = cfg
         self.tie_weights = cfg.tie_weights
 
-        self.token_embedding = nn.Embedding(cfg.vocab_size, cfg.hidden_dim)
-        self.rotary_embd = RotaryEmbedding(cfg)
-        self.blocks = nn.ModuleList([LMBlock(cfg) for _ in range(cfg.n_blocks)])
-        self.norm = RMSNorm(cfg)
-        self.head = nn.Linear(cfg.hidden_dim, cfg.vocab_size, bias=False)
+        self.token_embedding = nn.Embedding(cfg.vocab_size, cfg.hidden_dim) # Embedding table: vocab_size → hidden_dim
+        self.rotary_embd = RotaryEmbedding(cfg) # the RotaryEmbedding module
+        self.blocks = nn.ModuleList([LMBlock(cfg) for _ in range(cfg.n_blocks)]) # ModuleList of n_blocks LMBlock layers
+        self.norm = RMSNorm(cfg) # final RMSNorm
+        self.head = nn.Linear(cfg.hidden_dim, cfg.vocab_size, bias=False) # Linear: hidden_dim → vocab_size (no bias)
 
-        self.apply(self._init_weights)
-
+        # If self.tie_weights, share the token embedding weights with the head
         if self.tie_weights:
             self.head.weight = self.token_embedding.weight
+
+        self.apply(self._init_weights)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -453,12 +432,11 @@ class LanguageModel(nn.Module):
         """
         B, T_curr, _ = x.size()
 
-        position_ids = torch.arange(
-            start_pos,
-            start_pos + T_curr,
-            device=x.device,
-            dtype=torch.long,
-        ).unsqueeze(0).expand(B, -1)
+        position_ids = torch.arange(start_pos,
+                                    start_pos + T_curr,
+                                    device=x.device,
+                                    dtype=torch.long,
+                                    ).unsqueeze(0).expand(B, -1)
         cos, sin = self.rotary_embd(position_ids)
 
         if kv_cache is None:
@@ -466,13 +444,11 @@ class LanguageModel(nn.Module):
 
         hidden = x
         for i, block in enumerate(self.blocks):
-            hidden, block_cache = block(
-                hidden,
-                cos,
-                sin,
-                attention_mask=attention_mask,
-                block_kv_cache=kv_cache[i],
-            )
+            hidden, block_cache = block(hidden,
+                                        cos,
+                                        sin,
+                                        attention_mask=attention_mask,
+                                        block_kv_cache=kv_cache[i])
             kv_cache[i] = block_cache
 
         hidden = self.norm(hidden)
@@ -517,7 +493,14 @@ class LanguageModel(nn.Module):
         cfg.hidden_dim = hf.hidden_size
         cfg.inter_dim = hf.intermediate_size
         cfg.rms_eps = hf.rms_norm_eps
-        cfg.re_base = hf.rope_parameters.get('rope_theta', 100000)
+
+        # cfg.re_base = hf.rope_parameters.get('rope_theta', 100000)
+
+        rope_parameters = getattr(hf, 'rope_parameters', None)
+        cfg.re_base = (rope_parameters.get('rope_theta', 100000) 
+                       if rope_parameters is not None 
+                       else getattr(hf, 'rope_theta', 100000))
+        
         cfg.max_position_embeddings = hf.max_position_embeddings
         cfg.n_heads = hf.num_attention_heads
         cfg.n_kv_heads = hf.num_key_value_heads
