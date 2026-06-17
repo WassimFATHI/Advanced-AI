@@ -76,16 +76,18 @@ class VisionLanguageModel(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        # self.vision_encoder = ...   # the ViT image encoder
-        #   if load_backbone: use ViT.from_pretrained(cfg.vit)
-        #   else:             use ViT(cfg.vit)
-        # self.decoder = ...          # the causal language model
-        #   if load_backbone: use LanguageModel.from_pretrained(cfg.lm)
-        #   else:             use LanguageModel(cfg.lm)
-        # self.MP = ...               # the ModalityProjector
-        # self.tokenizer = ...        # the tokenizer (use get_tokenizer)
+        if load_backbone:
+            self.vision_encoder = ViT.from_pretrained(cfg.vit)
+        else:
+            self.vision_encoder = ViT(cfg.vit)
 
-        raise NotImplementedError
+        if load_backbone:
+            self.decoder = LanguageModel.from_pretrained(self.cfg.lm)
+        else:
+            self.decoder = LanguageModel(self.cfg.lm)
+        self.MP = ModalityProjector(cfg)              # the ModalityProjector
+        self.tokenizer = get_tokenizer(cfg.lm.tokenizer,cfg.image_token)        # the tokenizer (use get_tokenizer)
+
 
     # ── PROVIDED — image token replacement ───────────────────────────────────
     def _replace_img_tokens_with_embd(self, input_ids, token_embd, image_embd):
@@ -154,7 +156,34 @@ class VisionLanguageModel(nn.Module):
 
         TODO 7 — If no targets: return (hidden, None) for generation.
         """
-        raise NotImplementedError
+        #1 
+        token_embedding = self.decoder.token_embedding(input_ids)
+
+        #2
+        images = self._process_images(pixel_values, input_ids.device)
+        image_feats = self.vision_encoder(images)
+
+        #3
+        image_embedding= self.MP(image_feats)
+        
+        #4
+        token_embedding = self._replace_img_tokens_with_embd(input_ids, token_embedding, image_embedding)
+
+        #5
+        x,_ = self.decoder(token_embedding,attention_mask=attention_mask)
+        if targets is None:
+            return x,None
+        else:
+            logits = self.decoder.head(x)
+        
+            shift_logits = logits[:, :-1, :].contiguous()   # positions 0..T-2 → prédisent 1..T-1
+            shift_labels = targets[:, 1:].contiguous()       # on jette le 1er label
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100,
+            )
+            return logits, loss
 
     # ── PROVIDED — autoregressive generation ─────────────────────────────────
     @torch.inference_mode()

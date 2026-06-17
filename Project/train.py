@@ -55,7 +55,7 @@ def get_lr(step: int, max_lr: float, max_steps: int) -> float:
 
 # ── Data loading (PROVIDED) ───────────────────────────────────────────────────
 def get_dataloaders(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
-    from datasets import load_from_disk
+    from datasets import load_from_disk, concatenate_datasets
 
     if not train_cfg.dataset_local_path:
         raise ValueError(
@@ -66,12 +66,11 @@ def get_dataloaders(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
     tokenizer = get_tokenizer(vlm_cfg.lm.tokenizer, vlm_cfg.image_token)
     image_processor = get_image_processor(vlm_cfg.vit.img_size)
 
-    print(f"Loading dataset from disk: {train_cfg.dataset_local_path}")
-    raw = load_from_disk(train_cfg.dataset_local_path)
-    # save_to_disk() preserves splits; access the train split
-    ds = raw["train"] if "train" in raw else raw
-
     if train_cfg.dataset_type == 'flickr':
+        print(f"Loading dataset from disk: {train_cfg.dataset_local_path}")
+        raw = load_from_disk(train_cfg.dataset_local_path)
+        ds = raw["train"] if "train" in raw else raw
+
         from data.dataset import FlickrDataset
         train_dataset = FlickrDataset(
             ds, tokenizer, image_processor, vlm_cfg
@@ -80,6 +79,28 @@ def get_dataloaders(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
             ds, tokenizer, image_processor, vlm_cfg
         )
     else:
+        # Load and concatenate all cauldron subsets
+        splits = []
+        base_path = train_cfg.dataset_local_path
+        for subset in train_cfg.dataset_subsets:
+            subset_path = os.path.join(base_path, subset)
+            if not os.path.exists(subset_path):
+                print(f"  [skip] {subset} not found at {subset_path}")
+                continue
+            print(f"  Loading {subset}...")
+            raw = load_from_disk(subset_path)
+            ds = raw["train"] if "train" in raw else raw
+            splits.append(ds)
+
+        if not splits:
+            raise ValueError(
+                f"No cauldron subsets found under {base_path}/. "
+                "Run prepare_datasets.py first."
+            )
+
+        ds = concatenate_datasets(splits)
+        print(f"Concatenated {len(splits)} subsets → {len(ds)} samples")
+
         from data.dataset import CauldronDataset
         train_dataset = CauldronDataset(
             ds, tokenizer, image_processor, vlm_cfg
@@ -213,40 +234,34 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
         # STUDENT SECTION — implement the training step
         #
         # TODO 1 — Move tensors to device:
-        #     input_ids      = batch["input_ids"].to(device)
-        #     pixel_values   = batch["pixel_values"].to(device)
-        #     attention_mask = batch["attention_mask"].to(device)
-        #     labels         = batch["labels"].to(device)
-        #
+        input_ids      = batch["input_ids"].to(device)
+        pixel_values   = batch["pixel_values"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels         = batch["labels"].to(device)
+        
         # TODO 2 — Forward pass (inside autocast_ctx for mixed precision):
-        #     with autocast_ctx:
-        #         _, loss = model(
-        #             input_ids, pixel_values, attention_mask, labels
-        #         )
-        #
+        with autocast_ctx:
+            _, loss = model(
+                input_ids, pixel_values, attention_mask, labels
+            )
+
         # TODO 3 — Scale loss for gradient accumulation:
-        #     loss = loss / train_cfg.gradient_accumulation_steps
-        #
+        loss = loss / train_cfg.gradient_accumulation_steps
+        
         # TODO 4 — Backward pass:
-        #     loss.backward()
-        #
+        loss.backward()
+        
         # TODO 5 — Optimiser step (only on update steps):
-        #     if is_update_step:
-        #         torch.nn.utils.clip_grad_norm_(
-        #             all_params, train_cfg.max_grad_norm
-        #         )
-        #         for g, max_lr in zip(optimizer.param_groups, max_lrs):
-        #             g["lr"] = get_lr(
-        #                 global_step, max_lr, train_cfg.max_steps
-        #             )
-        #         optimizer.step()
-        #         optimizer.zero_grad()
-        #         global_step += 1
-        #
+        if is_update_step:
+            torch.nn.utils.clip_grad_norm_(all_params, train_cfg.max_grad_norm)
+            for g, max_lr in zip(optimizer.param_groups, max_lrs):
+                g["lr"] = get_lr(global_step, max_lr, train_cfg.max_steps)
+            optimizer.step()
+            optimizer.zero_grad()
+            global_step += 1
+        
         # TODO 6 — Store the unscaled loss for logging:
-        #     batch_loss = (
-        #         loss.item() * train_cfg.gradient_accumulation_steps
-        #     )
+        batch_loss = (loss.item() * train_cfg.gradient_accumulation_steps)  
         # ══════════════════════════════════════════════════════════════════════
 
         accum_step += 1
