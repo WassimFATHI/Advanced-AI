@@ -156,9 +156,9 @@ class ViTAttention(nn.Module):
         #         channel dimension with view.
         #         Apply out_proj then resid_dropout.
         #         Output: [B, T, C]
-
         scores = scores.permute(0,2,1,3).contiguous().view(B,T,C)
-
+      
+        scores = self.resid_dropout(self.out_proj(scores))   
         return scores
 
 

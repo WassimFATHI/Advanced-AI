@@ -199,7 +199,7 @@ class LMAttention(nn.Module):
         self.attn_dropout = nn.Dropout(self.dropout)
         self.resid_dropout = nn.Dropout(self.dropout)
         self.sdpa = hasattr(F, "scaled_dot_product_attention")
-        self.sdpa = False 
+
     def forward(self, x, cos, sin, attention_mask=None, block_kv_cache=None):
         """
         Args:
