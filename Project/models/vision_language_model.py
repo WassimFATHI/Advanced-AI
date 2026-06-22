@@ -76,16 +76,23 @@ class VisionLanguageModel(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        # self.vision_encoder = ...   # the ViT image encoder
-        #   if load_backbone: use ViT.from_pretrained(cfg.vit)
-        #   else:             use ViT(cfg.vit)
-        # self.decoder = ...          # the causal language model
-        #   if load_backbone: use LanguageModel.from_pretrained(cfg.lm)
-        #   else:             use LanguageModel(cfg.lm)
-        # self.MP = ...               # the ModalityProjector
-        # self.tokenizer = ...        # the tokenizer (use get_tokenizer)
+        if load_backbone:
+            self.vision_encoder = ViT.from_pretrained(cfg.vit)
+            # pixel_values [B,3,512,512] -> image_feats [B,1024,768]
+        else:
+            self.vision_encoder = ViT(cfg.vit)
+            # [B,3,512,512] -> [B,1024,768]
 
-        raise NotImplementedError
+        if load_backbone:
+            self.decoder = LanguageModel.from_pretrained(self.cfg.lm)
+            # embeddings [B,T,960] -> hidden [B,T,960]
+        else:
+            self.decoder = LanguageModel(self.cfg.lm)
+            # [B,T,960] -> [B,T,960]
+        self.MP = ModalityProjector(cfg)              # the ModalityProjector
+        # image_feats [B,1024,768] -> image_embedding [B,64,960]
+        self.tokenizer = get_tokenizer(cfg.lm.tokenizer,cfg.image_token)        # the tokenizer (use get_tokenizer)
+
 
     # ── PROVIDED — image token replacement ───────────────────────────────────
     def _replace_img_tokens_with_embd(self, input_ids, token_embd, image_embd):
@@ -154,7 +161,47 @@ class VisionLanguageModel(nn.Module):
 
         TODO 7 — If no targets: return (hidden, None) for generation.
         """
-        raise NotImplementedError
+        #1 
+        token_embedding = self.decoder.token_embedding(input_ids)
+        # input_ids [B,T] -> token_embedding [B,T,960]
+
+        #2
+        images = self._process_images(pixel_values, input_ids.device)
+        # pixel_values [B,3,512,512] -> images [B,3,512,512]
+        image_feats = self.vision_encoder(images)
+        # images [B,3,512,512] -> image_feats [B,1024,768]
+
+        #3
+        image_embedding= self.MP(image_feats)
+        # image_feats [B,1024,768] -> image_embedding [B,64,960]
+        
+        #4
+        token_embedding = self._replace_img_tokens_with_embd(input_ids, token_embedding, image_embedding)
+        # token_embedding [B,T,960]
+
+        #5
+        x,_ = self.decoder(token_embedding,attention_mask=attention_mask)
+        # token_embedding [B,T,960] -> x [B,T,960]
+        if targets is None:
+            return x,None
+            # x [B,T,960]
+        else:
+            logits = self.decoder.head(x)
+            # x [B,T,960] -> logits [B,T,vocab_size]
+        
+            shift_logits = logits[:, :-1, :].contiguous()   # positions 0..T-2 → prédisent 1..T-1
+            # shift_logits [B,T-1,vocab_size]
+            shift_labels = targets[:, 1:].contiguous()       # on jette le 1er label
+            # shift_labels [B,T-1]
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                # [B*(T-1),vocab_size]
+                shift_labels.view(-1),
+                # [B*(T-1)]
+                ignore_index=-100,
+            )
+            return logits, loss
+            # logits [B,T,vocab_size], loss []
 
     # ── PROVIDED — autoregressive generation ─────────────────────────────────
     @torch.inference_mode()
@@ -171,9 +218,11 @@ class VisionLanguageModel(nn.Module):
     ):
         """Autoregressively decode text conditioned on image + prompt. PROVIDED."""
         images = self._process_images(pixel_values, input_ids.device)
+        # pixel_values [B,3,512,512] -> images [B,3,512,512]
         token_embd = self.decoder.token_embedding(input_ids)
 
         image_feats = self.vision_encoder(images)
+        # images [B,3,512,512] -> image_feats [B,1024,768]
         image_embd = self.MP(image_feats)
         token_embd = self._replace_img_tokens_with_embd(input_ids, token_embd, image_embd)
 
