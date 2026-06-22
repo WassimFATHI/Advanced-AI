@@ -176,8 +176,8 @@ class VisionLanguageModel(nn.Module):
         else:
             logits = self.decoder.head(x)
         
-            shift_logits = logits[:, :-1, :].contiguous()   # positions 0..T-2 → prédisent 1..T-1
-            shift_labels = targets[:, 1:].contiguous()       # on jette le 1er label
+            shift_logits = logits[:, :-1, :].contiguous()   
+            shift_labels = targets[:, 1:].contiguous()      
             loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
