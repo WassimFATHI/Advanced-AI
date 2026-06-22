@@ -71,12 +71,16 @@ def get_dataloaders(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
         raw = load_from_disk(train_cfg.dataset_local_path)
         ds = raw["train"] if "train" in raw else raw
 
+        split = ds.train_test_split(test_size=train_cfg.val_size, seed=42)
+        train_ds = split["train"]
+        val_ds = split["test"]
+
         from data.dataset import FlickrDataset
         train_dataset = FlickrDataset(
-            ds, tokenizer, image_processor, vlm_cfg
+            train_ds, tokenizer, image_processor, vlm_cfg
         )
         val_dataset = FlickrDataset(
-            ds, tokenizer, image_processor, vlm_cfg
+            val_ds, tokenizer, image_processor, vlm_cfg
         )
     else:
         # Load and concatenate all cauldron subsets
@@ -99,15 +103,25 @@ def get_dataloaders(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
             )
 
         ds = concatenate_datasets(splits)
-        print(f"Concatenated {len(splits)} subsets → {len(ds)} samples")
+        import numpy as np
+        
+        print("debut split")
+        n = len(ds)
+        n_val = min(train_cfg.val_size, max(1, n // 10))
+        perm = np.random.default_rng(42).permutation(n)
+        val_ds   = ds.select(perm[:n_val])
+        train_ds = ds.select(perm[n_val:])
+        print("split fini", len(train_ds), len(val_ds))
 
         from data.dataset import CauldronDataset
         train_dataset = CauldronDataset(
-            ds, tokenizer, image_processor, vlm_cfg
+            train_ds, tokenizer, image_processor, vlm_cfg
         )
         val_dataset = CauldronDataset(
-            ds, tokenizer, image_processor, vlm_cfg
+            val_ds, tokenizer, image_processor, vlm_cfg
         )
+        print("End of split")
+
 
     collator = VQACollator(tokenizer, max_length=train_cfg.max_length)
 
@@ -115,7 +129,7 @@ def get_dataloaders(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
         train_dataset,
         batch_size=train_cfg.batch_size,
         collate_fn=collator,
-        num_workers=2,
+        num_workers=1,
         pin_memory=True,
     )
     val_loader = DataLoader(
@@ -185,7 +199,9 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
 
     # ── Data ──────────────────────────────────────────────────────────────────
     train_loader, val_loader = get_dataloaders(train_cfg, vlm_cfg)
+    print("End of Data_loader")
     iter_train = iter(train_loader)
+    print("A")
 
     # ── AMP context ───────────────────────────────────────────────────────────
     autocast_dtype = (
@@ -194,6 +210,8 @@ def train(train_cfg: TrainConfig, vlm_cfg: VLMConfig):
     autocast_ctx = torch.autocast(
         device_type=device.type, dtype=autocast_dtype
     )
+    print("B")
+
 
     # ── Checkpoint directory ──────────────────────────────────────────────────
     os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
