@@ -53,12 +53,19 @@ class ViTPatchEmbeddings(nn.Module):
         self.hidden_dim = cfg.hidden_dim  # 768
 
         self.num_patches =  (self.img_size//self.patch_size)**2         # total patches = (img_size // patch_size)²
+        # AJOUT EXPLICATION: scalaire int = (512//16)^2 = 1024 tokens image par image.
+        # AJOUT EXPLICATION: ce nombre fixe la longueur T de la séquence visuelle: [B, T, hidden_dim].
         self.conv = nn.Conv2d(in_channels=3,out_channels=self.hidden_dim,kernel_size=self.patch_size,stride = self.patch_size,padding="valid")            # Conv2d patch extractor: kernel_size and stride
+        # AJOUT EXPLICATION: [B, 3, 512, 512] -> [B, hidden_dim, 32, 32] donc [B, 768, 32, 32].
+        # AJOUT EXPLICATION: kernel_size=stride=16 découpe l'image en patchs 16x16 sans chevauchement.
         #                                 # both equal to patch_size, in_channels=3,
         #                                 # out_channels=hidden_dim, padding="valid"
         self.position_embedding = nn.Parameter(torch.zeros(1,self.num_patches,self.hidden_dim))   # learnable nn.Parameter of shape
+        # AJOUT EXPLICATION: paramètre appris [1, 1024, 768], broadcasté sur B lors de l'addition aux tokens.
+        # AJOUT EXPLICATION: ajoute une information de position spatiale à chaque patch token.
         #                                 # [1, num_patches, hidden_dim]
         self.flatten = nn.Flatten(start_dim=-2)
+        # AJOUT EXPLICATION: fusionne les dimensions spatiales H_patch et W_patch: [B, 768, 32, 32] -> [B, 768, 1024].
 
     def forward(self, x):
         """
@@ -70,19 +77,25 @@ class ViTPatchEmbeddings(nn.Module):
         # TODO 1: Apply the convolutional patch extractor.
         #         Output: [B, hidden_dim, 32, 32]
         x = self.conv(x)
+        # AJOUT EXPLICATION: x passe de [B, 3, img_size, img_size] à [B, hidden_dim, img_size/patch_size, img_size/patch_size].
+        # AJOUT EXPLICATION: avec la config réelle: [B, 3, 512, 512] -> [B, 768, 32, 32].
 
         # TODO 2: Flatten the two spatial dimensions into one.
         #         Output: [B, hidden_dim, 1024]
         x = self.flatten(x)
+        # AJOUT EXPLICATION: les 32x32 positions spatiales deviennent une seule dimension séquence: [B, 768, 1024].
         
         # TODO 3: Swap the patch and channel dimensions.
         #         Output: [B, 1024, hidden_dim]
         x = x.permute(0, 2, 1)
+        # AJOUT EXPLICATION: réordonne en format Transformer [B, T, C]: [B, 768, 1024] -> [B, 1024, 768].
 
         # TODO 4: Add the learned position embeddings to each patch token.
         #         Output: [B, 1024, hidden_dim]
 
         x = x + self.position_embedding
+        # AJOUT EXPLICATION: addition broadcastée [B, 1024, 768] + [1, 1024, 768] -> [B, 1024, 768].
+        # AJOUT EXPLICATION: chaque token conserve son contenu de patch + son information de position.
 
         return x
 
@@ -103,16 +116,23 @@ class ViTAttention(nn.Module):
         self.hidden_dim = cfg.hidden_dim  # 768
         assert self.hidden_dim % self.n_heads == 0
         self.dropout = cfg.dropout
+        # AJOUT EXPLICATION: stocke temporairement la probabilité de dropout issue de la config.
 
         self.head_dim = self.hidden_dim // self.n_heads          # embedding dimension per attention head
+        # AJOUT EXPLICATION: scalaire int = 768//12 = 64; chaque tête travaille sur 64 dimensions.
         self.qkv_proj = nn.Linear(self.hidden_dim, self.hidden_dim*3)          # single Linear: hidden_dim → 3 × hidden_dim
+        # AJOUT EXPLICATION: projection [B, T, 768] -> [B, T, 2304] pour produire Q, K et V concaténés.
         #                              # (Q, K, V packed together; bias=True)
         self.out_proj = nn.Linear(self.hidden_dim,self.hidden_dim) # Linear: hidden_dim → hidden_dim (bias=True)
+        # AJOUT EXPLICATION: reprojette la concaténation des têtes: [B, T, 768] -> [B, T, 768].
         self.attn_dropout = nn.Dropout(p=self.dropout)      # Dropout on attention weights
+        # AJOUT EXPLICATION: ne change pas les shapes; régularise les poids/activations d'attention pendant l'entraînement.
         self.resid_dropout = nn.Dropout(p=self.dropout)    # Dropout on the output projection
+        # AJOUT EXPLICATION: sortie toujours [B, T, C], prête à être ajoutée au résidu dans ViTBlock.
         import torch.nn.functional as F
 
         self.sdpa = hasattr(nn.functional, "scaled_dot_product_attention") # True if F.scaled_dot_product_attention is available
+        # AJOUT EXPLICATION: booléen; si True, utilise l'attention optimisée de PyTorch.
 
 
     def forward(self, x):
@@ -123,20 +143,27 @@ class ViTAttention(nn.Module):
             [B, T, C]
         """
         B, T, C = x.size()
+        # AJOUT EXPLICATION: dépaquette x de forme [B, T, C], typiquement [B, 1024, 768].
 
         # TODO 1: Project x to queries, keys, and values in one shot with
         #         qkv_proj, then split into three equal chunks along the
         #         last dimension.
         #         q, k, v each → [B, T, C]
         x = self.qkv_proj(x)
+        # AJOUT EXPLICATION: [B, T, C] -> [B, T, 3*C], typiquement [B, 1024, 2304].
         q,k,v = x.chunk(3, dim=-1)
+        # AJOUT EXPLICATION: découpe la dernière dimension en 3: q,k,v ont chacun [B, T, C] = [B, 1024, 768].
 
         # TODO 2: Use view to introduce the head dimension, then transpose
         #         so heads come before the sequence.
         #         Each of q, k, v → [B, n_heads, T, head_dim]
         q = q.view(B, T, self.n_heads, self.head_dim).permute(0,2,1,3)
+        # AJOUT EXPLICATION: q [B, T, C] -> [B, T, n_heads, head_dim] -> [B, n_heads, T, head_dim].
+        # AJOUT EXPLICATION: avec la config réelle: [B, 1024, 768] -> [B, 12, 1024, 64].
         k = k.view(B, T, self.n_heads, self.head_dim).permute(0,2,1,3)
+        # AJOUT EXPLICATION: k prend la même forme que q: [B, 12, 1024, 64].
         v = v.view(B, T, self.n_heads, self.head_dim).permute(0,2,1,3)
+        # AJOUT EXPLICATION: v prend la même forme que q/k: [B, 12, 1024, 64].
 
 
         # TODO 3: Attend.
@@ -148,18 +175,23 @@ class ViTAttention(nn.Module):
         #       scores = q @ k.T / sqrt(head_dim), softmax, dropout, @ v
         if self.sdpa:
             scores = nn.functional.scaled_dot_product_attention(q,k,v,dropout_p=self.dropout,is_causal=False)
+            # AJOUT EXPLICATION: attention bidirectionnelle ViT; sortie scores [B, n_heads, T, head_dim] = [B, 12, 1024, 64].
+            # AJOUT EXPLICATION: is_causal=False car tous les patchs image peuvent se regarder dans les deux sens.
         else:
             scores = attn_dropout(torch.softmax((q@k.T)/sqrt(self.head_dim)))@V
+            # AJOUT EXPLICATION: fallback conceptuel: scores d'attention [B, n_heads, T, T] puis multiplication par V -> [B, n_heads, T, head_dim].
         
         # TODO 4: Transpose the head and sequence dimensions back, call
         #         contiguous, then collapse the head dimension into the
         #         channel dimension with view.
         #         Apply out_proj then resid_dropout.
         #         Output: [B, T, C]
-        scores.permute(0,2,1,3)
-
         scores = scores.permute(0,2,1,3).contiguous().view(B,T,C)
-
+        # AJOUT EXPLICATION: [B, n_heads, T, head_dim] -> [B, T, n_heads, head_dim] -> [B, T, C].
+        # AJOUT EXPLICATION: contiguous() sécurise le layout mémoire avant view().
+      
+        scores = self.resid_dropout(self.out_proj(scores))   
+        # AJOUT EXPLICATION: out_proj puis dropout gardent la forme [B, T, C], typiquement [B, 1024, 768].
         return scores
 
 
@@ -174,12 +206,17 @@ class ViTMLP(nn.Module):
         super().__init__()
 
         self.activation_fn = nn.GELU() # GELU activation (approximate='tanh')
+        # AJOUT EXPLICATION: activation non linéaire, shape inchangée: [B, T, inter_dim] -> [B, T, inter_dim].
         self.fc1 = nn.Linear(cfg.hidden_dim,cfg.inter_dim)              # Linear: hidden_dim → inter_dim
+        # AJOUT EXPLICATION: première projection MLP: [B, T, 768] -> [B, T, 3072].
         self.fc2 = nn.Linear(cfg.inter_dim,cfg.hidden_dim)              # Linear: inter_dim → hidden_dim
+        # AJOUT EXPLICATION: deuxième projection MLP: [B, T, 3072] -> [B, T, 768].
         self.dropout = cfg.dropout
+        # AJOUT EXPLICATION: stocke temporairement la probabilité de dropout issue de la config.
 
 
         self.dropout = nn.Dropout(p=self.dropout)          # Dropout
+        # AJOUT EXPLICATION: module Dropout; ne change pas la shape [B, T, hidden_dim].
 
 
     def forward(self, x):
@@ -190,6 +227,7 @@ class ViTMLP(nn.Module):
               then dropout.
         """
         x = self.dropout(self.fc2(self.activation_fn(self.fc1(x))))
+        # AJOUT EXPLICATION: [B,T,768] -> fc1 [B,T,3072] -> GELU [B,T,3072] -> fc2 [B,T,768] -> dropout [B,T,768].
         return x
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -199,9 +237,13 @@ class ViTBlock(nn.Module):
         super().__init__()
 
         self.ln1 = nn.LayerNorm(cfg.hidden_dim)    # LayerNorm applied before attention
+        # AJOUT EXPLICATION: normalise la dernière dimension; [B, T, 768] -> [B, T, 768].
         self.attn = ViTAttention(cfg)   # the ViTAttention sub-layer
+        # AJOUT EXPLICATION: sous-couche d'attention multi-têtes; [B, T, 768] -> [B, T, 768].
         self.ln2 = nn.LayerNorm(cfg.hidden_dim)    # LayerNorm applied before the MLP
+        # AJOUT EXPLICATION: deuxième normalisation pre-norm avant le MLP; shape inchangée [B, T, 768].
         self.mlp = ViTMLP(cfg)    # the ViTMLP sub-layer
+        # AJOUT EXPLICATION: MLP token-wise; [B, T, 768] -> [B, T, 3072] -> [B, T, 768].
 
 
     def forward(self, x):
@@ -216,8 +258,12 @@ class ViTBlock(nn.Module):
         #       with pre-norm and residual (pattern shown in the docstring).
 
         x =  x + self.attn(self.ln1(x))
+        # AJOUT EXPLICATION: résidu attention: [B,T,768] + [B,T,768] -> [B,T,768].
+        # AJOUT EXPLICATION: ln1 stabilise l'entrée; attn contextualise chaque patch avec tous les autres patchs.
 
         x = x + self.mlp(self.ln2(x))
+        # AJOUT EXPLICATION: résidu MLP: [B,T,768] + [B,T,768] -> [B,T,768].
+        # AJOUT EXPLICATION: le MLP transforme chaque token indépendamment après l'attention.
         return x
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -229,11 +275,17 @@ class ViT(nn.Module):
         self.cls_flag = cfg.cls_flag
 
         self.patch_embedding = ViTPatchEmbeddings(cfg) # the ViTPatchEmbeddings sub-module
+        # AJOUT EXPLICATION: convertit l'image [B,3,512,512] en tokens patchs [B,1024,768].
         self.dropout = nn.Dropout(p=cfg.dropout)          # Dropout
+        # AJOUT EXPLICATION: dropout appliqué aux embeddings de patchs; shape inchangée [B,1024,768].
         self.n_blocks = cfg.n_blocks
+        # AJOUT EXPLICATION: nombre de blocs Transformer empilés, typiquement 12.
         self.blocks = nn.ModuleList(
             [ViTBlock(cfg) for _ in range(self.n_blocks)])
+        # AJOUT EXPLICATION: ModuleList de n_blocks blocs; chaque bloc conserve [B,1024,768].
+        # AJOUT EXPLICATION: ModuleList enregistre correctement les paramètres pour PyTorch/state_dict/GPU.
         self.layer_norm = nn.LayerNorm(cfg.hidden_dim,eps = cfg.ln_eps)       # final LayerNorm (hidden_dim, eps=cfg.ln_eps)
+        # AJOUT EXPLICATION: normalisation finale des tokens visuels: [B,1024,768] -> [B,1024,768].
 
 
         self.apply(self._init_weights)
@@ -261,14 +313,19 @@ class ViT(nn.Module):
 
         #TODO 1: Compute the patch embeddings.  → [B, 1024, 768]
         x = self.patch_embedding(x)
+        # AJOUT EXPLICATION: image brute [B,3,512,512] -> séquence visuelle [B,1024,768].
 
         #TODO 2: Apply dropout.
         x = self.dropout(x)
+        # AJOUT EXPLICATION: applique une régularisation sans changer la forme [B,1024,768].
         #TODO 3: Pass the sequence through each transformer block in order.
         for block in self.blocks:
+            # AJOUT EXPLICATION: chaque itération applique un ViTBlock qui conserve la shape [B,1024,768].
             x = block(x)
+            # AJOUT EXPLICATION: les tokens deviennent progressivement plus contextualisés par attention + MLP.
         #TODO 4: Apply the final layer normalization.
         x = self.layer_norm(x)
+        # AJOUT EXPLICATION: normalisation finale avant sortie ViT; shape [B,1024,768].
         #TODO 5: Return all patch tokens (cls_flag is False for this encoder).
         return x
 
