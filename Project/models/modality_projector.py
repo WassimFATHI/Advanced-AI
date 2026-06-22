@@ -40,17 +40,24 @@ class ModalityProjector(nn.Module):
         """
         super().__init__()
         self.pixel_shuffle_factor = cfg.projector.pixel_shuffle_factor  # 4
+        # Format: f = 4 ; chaque bloc spatial 4×4 de patchs ViT sera fusionné en 1 token visuel.
 
         self.input_dim  = cfg.vit.hidden_dim * cfg.projector.pixel_shuffle_factor**2    # vit.hidden_dim × pixel_shuffle_factor²
+        # Format après pixel_shuffle: [B, 1024, 768] → [B, 64, 768×4²] = [B, 64, 12288].
+        # Explication: un token compressé concatène 16 patchs voisins, donc sa dimension devient 16×768.
         #                         # (embedding size after merging neighbouring patches)
         self.output_dim = cfg.lm.hidden_dim
+        # Format cible LM: chaque token visuel doit avoir la même dimension que les embeddings texte du LM, ici 960.
         self.proj = nn.Linear(self.input_dim, self.output_dim, bias = False)         # bias-free Linear: input_dim → output_dim
+        # Format: projection appliquée token par token, [B, 64, 12288] → [B, 64, 960].
+        # Explication: apprend le passage de l'espace visuel compressé vers l'espace caché du language model.
 
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            # Format: module.weight a la shape [output_dim, input_dim] = [960, 12288] pour self.proj.
 
     # ── PROVIDED — pixel shuffle spatial downsampling ─────────────────────────
     # Do NOT modify this method.  It rearranges ViT patch tokens so that
@@ -84,5 +91,10 @@ class ModalityProjector(nn.Module):
         """
         # TODO: Apply pixel shuffle, then the linear projection.
         x = self.pixel_shuffle(x)
+        # Format: [B, 1024, 768] → [B, 64, 12288].
+        # Explication: regroupe spatialement les patchs ViT par blocs 4×4 sans encore changer vers la dimension LM.
         x = self.proj(x)
+        # Format: [B, 64, 12288] → [B, 64, 960].
+        # Explication: convertit les tokens image compressés en embeddings compatibles avec le LM.
+        # Format retourné: [B, 64, 960], soit 64 tokens image prêts à remplacer les tokens <|image|>.
         return x
