@@ -37,7 +37,8 @@ class RMSNorm(nn.Module):
     def __init__(self, cfg):
         super().__init__()
 
-        self.weight = nn.Parameter(torch.ones(cfg.hidden_dim))
+        # weight: [hidden_dim]
+        self.weight = nn.Parameter(torch.ones(cfg.hidden_dim)) # learnable scale of shape [hidden_dim], initialized to all ones (use nn.Parameter)
         self.rms_eps = cfg.rms_eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -49,7 +50,9 @@ class RMSNorm(nn.Module):
         """
         # TODO: Compute the inverse RMS of x along the last dimension
         #       (keepdim=True), then scale x by it and the learned weight.
+        # x: [B,T,H]
         inv_rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.rms_eps)
+        # out: [B,T,H]
         return x * inv_rms * self.weight
 
 
@@ -127,17 +130,24 @@ class RotaryEmbedding(nn.Module):
         """
         B, T = position_ids.shape
         inv_freq = self.inv_freq
+        # inv_freq: [dim/2]=[32]
 
+        # position_ids: [B,T]
         seq_len = int(position_ids.max().item()) + 1
         if seq_len > self.max_position_embeddings:
             scale = self.max_position_embeddings / seq_len
             inv_freq = inv_freq * scale
 
+        # [B,T] -> [B*T]
         pos = position_ids.reshape(-1).to(dtype=inv_freq.dtype)
+        # pos: [B*T,1]
         freqs = pos.unsqueeze(-1) * inv_freq.unsqueeze(0)
+        # freqs: [B,T,dim/2]
         freqs = freqs.view(B, T, self.dim // 2)
 
+        # [B,T,dim/2] -> [B,T,dim]
         emb = torch.cat((freqs, freqs), dim=-1)
+        # cos/sin: [B,T,dim]=[B,T,64]
         cos = emb.cos() * self.attn_scaling
         sin = emb.sin() * self.attn_scaling
         return cos, sin
@@ -184,21 +194,20 @@ class LMAttention(nn.Module):
 
         assert self.n_heads % self.n_kv_heads == 0
 
-        self.n_kv_groups = self.n_heads // self.n_kv_heads
-        self.head_dim = self.hidden_dim // self.n_heads
-        self.q_proj = nn.Linear(
-            self.hidden_dim, self.n_heads * self.head_dim, bias=False
-        )
-        self.k_proj = nn.Linear(
-            self.hidden_dim, self.n_kv_heads * self.head_dim, bias=False
-        )
-        self.v_proj = nn.Linear(
-            self.hidden_dim, self.n_kv_heads * self.head_dim, bias=False
-        )
-        self.out_proj = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
-        self.attn_dropout = nn.Dropout(self.dropout)
-        self.resid_dropout = nn.Dropout(self.dropout)
-        self.sdpa = hasattr(F, "scaled_dot_product_attention")
+        self.n_kv_groups = self.n_heads // self.n_kv_heads # query heads per KV head (n_heads // n_kv_heads)
+        self.head_dim = self.hidden_dim // self.n_heads # embedding dimension per attention head
+
+        # q: [B,T,960]
+        self.q_proj = nn.Linear(self.hidden_dim, self.n_heads * self.head_dim, bias=False) # Linear: hidden_dim → n_heads × head_dim (no bias)
+        # k: [B,T,320]
+        self.k_proj = nn.Linear(self.hidden_dim, self.n_kv_heads * self.head_dim, bias=False) # Linear: hidden_dim → n_kv_heads × head_dim (no bias)
+        # v: [B,T,320]
+        self.v_proj = nn.Linear(self.hidden_dim, self.n_kv_heads * self.head_dim, bias=False) # Linear: same output shape as k_proj (no bias)
+        # out_proj: [B,T,960]->[B,T,960]
+        self.out_proj = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False) # Linear: hidden_dim → hidden_dim (no bias)
+        self.attn_dropout = nn.Dropout(self.dropout) # Dropout on attention weights
+        self.resid_dropout = nn.Dropout(self.dropout) # Dropout on the output
+        self.sdpa = hasattr(F, "scaled_dot_product_attention") # True if F.scaled_dot_product_attention is available
 
     def forward(self, x, cos, sin, attention_mask=None, block_kv_cache=None):
         """
@@ -248,33 +257,38 @@ class LMAttention(nn.Module):
         q = self.q_proj(x)
         k = self.k_proj(x)
         v = self.v_proj(x)
+        # q [B,Tc,960], k/v [B,Tc,320]
 
+        # [B,heads,T,head_dim]
         q = q.view(B, T_curr, self.n_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, T_curr, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, T_curr, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        # q [B,15,Tc,64], k/v [B,5,Tc,64]
 
         q, k = apply_rotary_pos_embd(q, k, cos, sin)
 
         if block_kv_cache is None:
             block_kv_cache = {"key": k, "value": v}
+            # cache: [B,5,Tc,64]
         else:
             k = torch.cat((block_kv_cache["key"], k), dim=2)
             v = torch.cat((block_kv_cache["value"], v), dim=2)
             block_kv_cache = {"key": k, "value": v}
+            # cache: [B,5,Tkv,64]
 
         k_exp = k.repeat_interleave(self.n_kv_groups, dim=1)
         v_exp = v.repeat_interleave(self.n_kv_groups, dim=1)
+        # k/v exp [B,15,Tkv,64]
         T_kv = k_exp.size(2)
 
         attn_mask = None
         if attention_mask is not None:
+            # attention_mask: [B,T_total]
             mask = attention_mask[:, :T_kv].to(device=q.device)
-            attn_mask = torch.zeros(
-                mask.shape, dtype=q.dtype, device=q.device
-            )
-            attn_mask = attn_mask.masked_fill(
-                mask == 0, torch.finfo(q.dtype).min
-            )
+            # attn_mask: [B,Tkv]
+            attn_mask = torch.zeros(mask.shape, dtype=q.dtype, device=q.device)
+            attn_mask = attn_mask.masked_fill(mask == 0, torch.finfo(q.dtype).min)
+            # [B,Tkv] -> [B,1,1,Tkv]
             attn_mask = attn_mask.unsqueeze(1).unsqueeze(1)
 
         is_causal = T_curr == T_kv and T_curr > 1
@@ -287,6 +301,7 @@ class LMAttention(nn.Module):
                     torch.ones(T_curr, T_kv, dtype=torch.bool, device=q.device),
                     diagonal=1,
                 )
+                # attn_mask: [B,1,Tc,Tkv]
                 attn_mask = attn_mask.expand(B, 1, T_curr, T_kv).clone()
                 attn_mask = attn_mask.masked_fill(causal, torch.finfo(q.dtype).min)
                 attn = F.scaled_dot_product_attention(
@@ -304,27 +319,25 @@ class LMAttention(nn.Module):
                     is_causal=is_causal,
                 )
         else:
+            # q [B,15,Tc,64] @ kᵀ [B,15,64,Tkv]
             scores = q @ k_exp.transpose(-2, -1)
             scores = scores / (self.head_dim ** 0.5)
             if attn_mask is not None:
                 scores = scores + attn_mask
             if is_causal:
                 causal_mask = torch.triu(
-                    torch.ones(
-                        T_curr, T_kv, dtype=torch.bool, device=q.device
-                    ),
+                    torch.ones(T_curr, T_kv, dtype=torch.bool, device=q.device),
                     diagonal=1,
                 )
-                scores = scores.masked_fill(
-                    causal_mask, torch.finfo(q.dtype).min
-                )
+                scores = scores.masked_fill(causal_mask, torch.finfo(q.dtype).min)
             attn_weights = F.softmax(scores, dim=-1)
             attn_weights = self.attn_dropout(attn_weights)
+            # [B,15,Tc,Tkv] @ [B,15,Tkv,64]
             attn = attn_weights @ v_exp
 
-        out = attn.transpose(1, 2).contiguous().view(
-            B, T_curr, self.hidden_dim
-        )
+        # [B,15,Tc,64] -> [B,Tc,960]
+        out = attn.transpose(1, 2).contiguous().view(B, T_curr, self.hidden_dim)
+        # out: [B,Tc,960]
         out = self.out_proj(out)
         out = self.resid_dropout(out)
         return out, block_kv_cache
@@ -343,9 +356,12 @@ class LMMLP(nn.Module):
     def __init__(self, cfg):
         super().__init__()
 
-        self.gate_proj = nn.Linear(cfg.hidden_dim, cfg.inter_dim, bias=False)
-        self.up_proj = nn.Linear(cfg.hidden_dim, cfg.inter_dim, bias=False)
-        self.down_proj = nn.Linear(cfg.inter_dim, cfg.hidden_dim, bias=False)
+        # gate: [B,T,960]->[B,T,2560]
+        self.gate_proj = nn.Linear(cfg.hidden_dim, cfg.inter_dim, bias=False) # Linear: hidden_dim → inter_dim, no bias (gate branch)
+        # up: [B,T,960]->[B,T,2560]
+        self.up_proj = nn.Linear(cfg.hidden_dim, cfg.inter_dim, bias=False) # Linear: hidden_dim → inter_dim, no bias (value branch)
+        # down: [B,T,2560]->[B,T,960]
+        self.down_proj = nn.Linear(cfg.inter_dim, cfg.hidden_dim, bias=False) # Linear: inter_dim → hidden_dim, no bias
 
     def forward(self, x):
         """
@@ -363,10 +379,10 @@ class LMBlock(nn.Module):
     def __init__(self, cfg):
         super().__init__()
 
-        self.norm1 = RMSNorm(cfg)
-        self.attn = LMAttention(cfg)
-        self.norm2 = RMSNorm(cfg)
-        self.mlp = LMMLP(cfg)
+        self.norm1 = RMSNorm(cfg) # RMSNorm applied before attention
+        self.attn = LMAttention(cfg) # the LMAttention sub-layer
+        self.norm2 = RMSNorm(cfg) # RMSNorm applied before the MLP
+        self.mlp = LMMLP(cfg) # the LMMLP sub-layer
 
     def forward(self, x, cos, sin, attention_mask=None, block_kv_cache=None):
         """
@@ -410,14 +426,18 @@ class LanguageModel(nn.Module):
         self.cfg = cfg
         self.tie_weights = cfg.tie_weights
 
-        self.token_embedding = nn.Embedding(cfg.vocab_size, cfg.hidden_dim)
-        self.rotary_embd = RotaryEmbedding(cfg)
-        self.blocks = nn.ModuleList([LMBlock(cfg) for _ in range(cfg.n_blocks)])
-        self.norm = RMSNorm(cfg)
-        self.head = nn.Linear(cfg.hidden_dim, cfg.vocab_size, bias=False)
+        # input_ids [B,T] -> emb [B,T,H]
+        self.token_embedding = nn.Embedding(cfg.vocab_size, cfg.hidden_dim) # Embedding table: vocab_size → hidden_dim
+        self.rotary_embd = RotaryEmbedding(cfg) # the RotaryEmbedding module
+        self.blocks = nn.ModuleList([LMBlock(cfg) for _ in range(cfg.n_blocks)]) # ModuleList of n_blocks LMBlock layers
+        # norm: [B,T,H]->[B,T,H]
+        self.norm = RMSNorm(cfg) # final RMSNorm
+        # head: [B,T,960]->[B,T,49153]
+        self.head = nn.Linear(cfg.hidden_dim, cfg.vocab_size, bias=False) # Linear: hidden_dim → vocab_size (no bias)
 
         self.apply(self._init_weights)
-
+        
+        # If self.tie_weights, share the token embedding weights with the head
         if self.tie_weights:
             self.head.weight = self.token_embedding.weight
 
@@ -474,11 +494,13 @@ class LanguageModel(nn.Module):
             device=x.device,
             dtype=torch.long,
         ).unsqueeze(0).expand(B, -1)
+        # cos/sin: [B,Tc,64]
         cos, sin = self.rotary_embd(position_ids)
 
         if kv_cache is None:
             kv_cache = [None] * len(self.blocks)
 
+        # hidden: [B,Tc,H]
         hidden = x
         for i, block in enumerate(self.blocks):
             hidden, block_cache = block(
@@ -490,6 +512,7 @@ class LanguageModel(nn.Module):
             )
             kv_cache[i] = block_cache
 
+        # norm: [B,Tc,H]->[B,Tc,H]
         hidden = self.norm(hidden)
         return hidden, kv_cache
 
