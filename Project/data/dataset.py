@@ -19,6 +19,7 @@ Loading logic (in train.py):
     dataset = CauldronDataset(split, tokenizer, image_processor, cfg)
 """
 
+
 import logging
 import random
 
@@ -150,14 +151,15 @@ class FlickrDataset(IterableDataset):
             cfg.projector.image_token_length, cfg.image_token
         )
 
+
     def _get_caption(self, item):
         captions = item.get("original_alt_text") or item.get("alt_text") or []
         if isinstance(captions, str):
-            captions = [captions]
-        for c in captions:
-            if c and c.strip():
-                return c.strip()
-        return None
+           captions = [captions]
+        valid_captions = [c.strip() for c in captions if c and c.strip()]
+        if not valid_captions:
+            return None
+        return random.choice(valid_captions)
 
     def _build_messages(self, caption):
         return [
